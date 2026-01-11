@@ -36,23 +36,25 @@
 
     const App = () => {
       // --- CONFIG ---
-      const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-        apiKey: "YOUR_API_KEY",
-        authDomain: "your-app.firebaseapp.com",
-        projectId: "your-app",
-        storageBucket: "your-app.appspot.com",
-        messagingSenderId: "SENDER_ID",
-        appId: "APP_ID"
+      const firebaseConfig = {
+      const firebaseConfig = {
+      apiKey: "AIzaSyDNVu8AW4UGbUbGZeUzREDTizLYwtFKlPA",
+      authDomain: "agent-gem-hunter.firebaseapp.com",
+      projectId: "agent-gem-hunter",
+      storageBucket: "agent-gem-hunter.firebasestorage.app",
+      messagingSenderId: "599608770456",
+      appId: "1:599608770456:web:5008b4ec35fa6f37e0b5ed",
+      measurementId: "G-N4PRVMPR88"
       };
       
       const appId = typeof __app_id !== 'undefined' ? __app_id : 'agent-gem-hunter-pro-v6.5';
 
       // --- STATES ---
       const [user, setUser] = useState(null);
-      const [apiKey, setApiKey] = useState(localStorage.getItem('GEM_HUNTER_KEY') || '');
-      const [showKeyModal, setShowKeyModal] = useState(!apiKey);
+      const [apiKey, setApiKey] = useState("AIzaSyAok1iPSpXnhPJ9WlVIvZ4il9QEvGSKdsY");
+      const [showKeyModal, setShowKeyModal] = useState(false); 
       
-      const [wcProjectId, setWcProjectId] = useState(localStorage.getItem('WC_PROJECT_ID') || '');
+      const [wcProjectId, setWcProjectId] = useState("3a8fe31ab4e879bce1ae94cd1477baa3");
       const [showWcPrompt, setShowWcPrompt] = useState(false);
 
       const [input, setInput] = useState('');
@@ -79,7 +81,10 @@
       const [pairDex, setPairDex] = useState(null);
       const [holders, setHolders] = useState(null);
       const [volumeChange5m, setVolumeChange5m] = useState(null);
-      
+
+      // New states (add near other states)
+      const [honeypotStatus, setHoneypotStatus] = useState(null); // null | {isHoneypot: bool, details: string}
+      const [isCheckingHoneypot, setIsCheckingHoneypot] = useState(false);
       const chartRef = useRef(null);
       const chartInstance = useRef(null);
       const seenTxHashes = useRef(new Set());
@@ -433,14 +438,62 @@
 
         fetchWithRetry();
       };
+      
+      //Honeypot and Rug Check
+      const checkHoneypot = async () => {
+  if (!analysisResult?.contractAddress || !pairChain || isCheckingHoneypot) return;
+  
+  setIsCheckingHoneypot(true);
+  setHoneypotStatus(null);
+  setTerminalLines(prev => [...prev.slice(-15), `> Running honeypot check on ${shortenAddress(analysisResult.contractAddress)}...`]);
 
+  try {
+    let result = { isHoneypot: false, details: 'Unknown' };
+
+    if (pairChain === 'solana') {
+      // RugCheck.xyz - great for Solana/Pump.fun
+      const res = await fetch(`https://api.rugcheck.xyz/v1/tokens/${analysisResult.contractAddress}/report/summary`);
+      if (res.ok) {
+        const data = await res.json();
+        const risk = data?.risk_level?.toLowerCase() || 'unknown';
+        result = {
+          isHoneypot: risk.includes('high') || risk.includes('rug'),
+          details: `RugCheck: ${risk} risk • LP burned: ${data?.lp_burned ? 'Yes' : 'No'} • Mint revoked: ${data?.mint_revoked ? 'Yes' : 'No'}`
+        };
+      }
+    } else {
+      // GoPlus Labs for EVM chains (eth, base, bsc)
+      const chainIds = { ethereum: '1', base: '8453', bsc: '56' };
+      const chainId = chainIds[pairChain] || '1';
+      const res = await fetch(`https://api.gopluslabs.io/api/v1/token_security/${chainId}?contract_addresses=${analysisResult.contractAddress}`);
+      if (res.ok) {
+        const data = await res.json();
+        const info = data.result?.[analysisResult.contractAddress.toLowerCase()];
+        if (info) {
+          const isHp = info.is_honeypot === '1' || info.is_open_source === '0' || parseInt(info.locked_liquidity_ratio || 0) < 50;
+          result = {
+            isHoneypot: isHp,
+            details: `GoPlus: ${isHp ? 'HIGH RISK' : 'Seems safe'} • LP locked: ${info.locked_liquidity_ratio || '?'}% • Tax: buy ${info.buy_tax || '?'}% / sell ${info.sell_tax || '?'}%`
+          };
+        }
+      }
+    }
+
+    setHoneypotStatus(result);
+    setTerminalLines(prev => [...prev.slice(-15), `> Honeypot check: ${result.isHoneypot ? '[DANGER]' : '[OK]'} ${result.details}`]);
+  } catch (err) {
+    setTerminalLines(prev => [...prev.slice(-15), `> Honeypot check failed: ${err.message}`]);
+  } finally {
+    setIsCheckingHoneypot(false);
+  }
+};
       // --- DEXSCREENER POLLING ---
       useEffect(() => {
         let pollInt;
         if (showVerdict && analysisResult?.contractAddress) {
           const poll = async () => {
             try {
-              const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${analysisResult.contractAddress}`);
+              const r = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${analysisResult.contractAddress}`);
               const j = await r.json();
               if (j.pairs?.length > 0) {
                 const best = j.pairs.reduce((a, b) => 
@@ -453,7 +506,7 @@
                 setPairChain(best.chainId);
                 setPairDex(best.dexName);
                 setHolders(best.holders || null);
-                setVolumeChange5m(best.volume?.h5 ? ((best.volume.h5 - (best.volume.h5Prev || best.volume.h5)) / (best.volume.h5Prev || best.volume.h5) * 100).toFixed(1) : null);
+                setVolumeChange5m(best.priceChange?.m5?.toFixed(1) ?? null);
                 setPriceHistory(prev => [...prev.slice(-50), {t: Date.now(), p: price}]);
               }
             } catch {}
@@ -563,46 +616,7 @@
       return (
         <div className="flex flex-col min-h-screen overflow-hidden">
           
-          {/* API Key Modal */}
-          {showKeyModal && (
-            <div className="fixed inset-0 bg-black/90 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                <div className="bg-[#0d1421] border border-emerald-500/30 p-8 rounded-2xl max-w-md w-full shadow-2xl shadow-emerald-900/20">
-                    <h2 className="text-xl font-black text-white mb-4 uppercase flex items-center gap-2 justify-center">
-                        <i className="fas fa-key text-emerald-500"></i> Access Portal
-                    </h2>
-                    <input 
-                        type="password" 
-                        placeholder="Google AI Studio Key..." 
-                        className="w-full bg-black border border-white/10 rounded-lg p-3 mb-4 outline-none focus:border-emerald-500 text-emerald-400 font-mono text-sm"
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            const val = e.target.value.trim();
-                            if (val) {
-                              localStorage.setItem('GEM_HUNTER_KEY', val);
-                              setApiKey(val);
-                              setShowKeyModal(false);
-                            }
-                          }
-                        }}
-                    />
-                    <button 
-                        onClick={(e) => {
-                          const input = e.currentTarget.parentNode.querySelector('input');
-                          const val = input.value.trim();
-                          if (val) {
-                            localStorage.setItem('GEM_HUNTER_KEY', val);
-                            setApiKey(val);
-                            setShowKeyModal(false);
-                          }
-                        }}
-                        className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-black py-3 rounded-lg uppercase text-sm transition-colors"
-                    >
-                        Unlock System
-                    </button>
-                </div>
-            </div>
-          )}
-
+      
           <header className="px-6 py-4 bg-black border-b border-white/5 flex justify-between items-center z-10">
             <div className="flex items-center gap-3">
               <i className="fas fa-bolt text-emerald-500 text-2xl animate-pulse"></i>
@@ -763,17 +777,25 @@
           <h3 className="text-xs font-black text-slate-500 uppercase mb-4">Live Market Stats</h3>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             {[
-              { label: 'Price', val: formatPrice(currentPrice) },
-              { label: 'Liquidity', val: formatLiq(liquidity) },
-              { label: 'MC/FDV', val: formatMC(marketCap) },
-              { label: 'Holders', val: holders },
-              { label: '5m Vol Δ', val: volumeChange5m + '%', color: volumeChange5m > 0 ? 'text-green-500' : 'text-red-500' }
-            ].map((stat, i) => (
-              <div key={i} className="bg-black/30 p-3 rounded-lg border border-white/5 text-center">
-                <div className="text-xs text-slate-500 uppercase">{stat.label}</div>
-                <div className={`text-lg font-black truncate ${stat.color || 'text-white'}`}>{stat.val}</div>
-              </div>
-            ))}
+  { label: 'Price', val: formatPrice(currentPrice) },
+  { label: 'Liquidity', val: formatLiq(liquidity) },
+  { label: 'MC/FDV', val: formatMC(marketCap) },
+  { label: 'Holders', val: holders ?? '—' },
+  // Changed label here ↓
+  { 
+    label: '5m Price Δ',   // ← Better: clear what it means
+    // or keep short: '5m Δ'
+    val: volumeChange5m ? `${volumeChange5m}%` : '—',
+    color: volumeChange5m > 0 ? 'text-green-500' : volumeChange5m < 0 ? 'text-red-500' : 'text-white'
+  }
+].map((stat, i) => (
+  <div key={i} className="bg-black/30 p-3 rounded-lg border border-white/5 text-center">
+    <div className="text-xs text-slate-500 uppercase">{stat.label}</div>
+    <div className={`text-lg font-black truncate ${stat.color || 'text-white'}`}>
+      {stat.val}
+    </div>
+  </div>
+))}
           </div>
         </div>
 
@@ -794,30 +816,51 @@
         </div>
 
         {/* Action Links */}
-        <div className="px-6 pb-8">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {pairChain === 'solana' ? (
-              <button className="bg-green-600 hover:bg-green-500 text-black font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all">
-                <i className="fas fa-bolt"></i> Buy Jupiter
-              </button>
-            ) : (
-              <button className="bg-blue-600 hover:bg-blue-500 text-white font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all">
-                <i className="fas fa-exchange-alt"></i> Trade
-              </button>
-            )}
-            <button className="bg-orange-600/70 hover:bg-orange-600 text-white font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all">
-              <i className="fas fa-vial"></i> Honeypot
-            </button>
-            {pairChain === 'solana' && (
-              <button className="bg-red-600/70 hover:bg-red-600 text-white font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all">
-                <i className="fas fa-skull"></i> Rug Check
-              </button>
-            )}
-            <button className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all">
-              <i className="fas fa-external-link-alt"></i> DexScreener
-            </button>
-          </div>
-        </div>
+<div className="px-6 pb-8">
+  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+    {/* Buy / Trade button - unchanged */}
+    {pairChain === 'solana' ? (
+      <button className="bg-green-600 hover:bg-green-500 text-black font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all">
+        <i className="fas fa-bolt"></i> Buy Jupiter
+      </button>
+    ) : (
+      <button className="bg-blue-600 hover:bg-blue-500 text-white font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all">
+        <i className="fas fa-exchange-alt"></i> Trade
+      </button>
+    )}
+
+    {/* Honeypot Check - */}
+    <button
+      onClick={checkHoneypot}
+      disabled={isCheckingHoneypot || !analysisResult?.contractAddress}
+      className={`bg-orange-600 hover:bg-orange-500 text-white font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all ${
+        isCheckingHoneypot ? 'opacity-50 cursor-wait' : ''
+      }`}
+    >
+      <i className={`fas ${isCheckingHoneypot ? 'fa-spinner fa-spin' : 'fa-vial'}`}></i>
+      {isCheckingHoneypot ? 'Checking...' : 'Honeypot'}
+    </button>
+
+    {/* Rug Check - Solana only, same function works */}
+    {pairChain === 'solana' && (
+      <button
+        onClick={checkHoneypot}
+        disabled={isCheckingHoneypot || !analysisResult?.contractAddress}
+        className={`bg-red-600 hover:bg-red-500 text-white font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all ${
+          isCheckingHoneypot ? 'opacity-50 cursor-wait' : ''
+        }`}
+      >
+        <i className={`fas ${isCheckingHoneypot ? 'fa-spinner fa-spin' : 'fa-skull'}`}></i>
+        Rug Check
+      </button>
+    )}
+
+    {/* DexScreener - unchanged */}
+    <button className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black py-3 rounded-xl uppercase text-xs flex items-center justify-center gap-2 transition-all">
+      <i className="fas fa-external-link-alt"></i> DexScreener
+    </button>
+  </div>
+</div>
 
         {/* Bottom Actions */}
         <div className="px-6 pb-6 border-t border-white/10 pt-6">
